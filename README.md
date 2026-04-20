@@ -5,7 +5,7 @@ Estimated ELO (5s move time): ~2000
 Python Chess Bot & GUI
 A fully functional chess application featuring a custom Negamax engine and a Pygame GUI. This project implements advanced chess programming techniques, including iterative deepening, transposition tables, and sophisticated move-ordering heuristics.
 
-🚀 Features
+# 🚀 Features
 The Engine
 Search Algorithm: Optimized Negamax with Alpha-Beta pruning.
 
@@ -23,7 +23,7 @@ Advanced Pruning: Includes Null-Move Pruning and Check Extensions.
 
 Opening Book: Supports .bin polyglot files (e.g., gm2600.bin) for high-level opening play.
 
-The Evaluation
+# The Evaluation
 The bot uses a "centipawn" scoring system considering:
 
 Material Weights: Weighted values for each piece.
@@ -36,7 +36,7 @@ Pawn Structure: Penalties for doubled or isolated pawns.
 
 King Safety: Shield-based evaluation to protect the king during the midgame.
 
-The Interface
+# The Interface
 Real-time Rendering: Built with pygame for a smooth, responsive experience.
 
 Multithreaded: The engine "thinks" on a background thread, so the GUI remains interactive and doesn't freeze during deep searches.
