@@ -1,9 +1,7 @@
 # NB.v1-Chess-Bot
 A fully functional chess application featuring a custom Negamax engine and a Pygame GUI. This project implements advanced chess programming techniques, including iterative deepening, transposition tables, and sophisticated move-ordering heuristics.
-Estimated ELO (5s move time): ~2000
 
-Python Chess Bot & GUI
-A fully functional chess application featuring a custom Negamax engine and a Pygame GUI. This project implements advanced chess programming techniques, including iterative deepening, transposition tables, and sophisticated move-ordering heuristics.
+Estimated ELO (5s move time): ~2000
 
 # 🚀 Features
 The Engine
