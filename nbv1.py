@@ -15,12 +15,18 @@ IMAGE = {}
 OPENING_BOOK_FILE  = "gm2600.bin"
 MAX_BOOK_PLY       = 20        # Stop using book after this many half-moves
 MAX_DEPTH          = 64        # Effectively unlimited; time control stops the search
-TIME_LIMIT         = 5     # seconds per move (override in main if desired)
+BASE_TIME_LIMIT    = 5      
 TT_MAX_SIZE        = 2_000_000 # Entries before TT is wiped
+
+# Adaptive time control parameters
+TIME_SCALE_OPENING    = 0.7   # Use less time in opening (book is available)
+TIME_SCALE_MIDDLEGAME = 1.3   # Use more time in complex middlegame
+TIME_SCALE_ENDGAME    = 1.0   # Normal time in endgame
+COMPLEXITY_THRESHOLD  = 25    # Number of legal moves to consider position complex
 
 PIECE_VALUES = {
     chess.PAWN:   100,
-    chess.KNIGHT: 320,
+    chess.KNIGHT: 330,
     chess.BISHOP: 330,
     chess.ROOK:   500,
     chess.QUEEN:  900,
@@ -28,15 +34,13 @@ PIECE_VALUES = {
 }
 
 # For MVV-LVA the king as an ATTACKER should be treated cheaply.
-# Using 20000 caused king-captures to be sorted dead last — the root bug
-# behind the queen-sacrifice blunder (Kxh2 sorted below all quiet moves).
 MVV_LVA_ATTACKER = {
     chess.PAWN:   100,
     chess.KNIGHT: 320,
     chess.BISHOP: 330,
     chess.ROOK:   500,
     chess.QUEEN:  900,
-    chess.KING:   100, 
+    chess.KING:   100,
 }
 
 # ---------- Piece-Square Tables (White's perspective, a1=index 0) ----------
@@ -72,13 +76,13 @@ BISHOP_TABLE = [
 ]
 ROOK_TABLE = [
      0,  0,  0,  0,  0,  0,  0,  0,
-     5, 10, 10, 10, 10, 10, 10,  5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-     0,  0,  0,  5,  5,  0,  0,  0,
+    20, 20, 20, 20, 20, 20, 20, 20,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+    -10,-10, -5,  0,  0, -5,-10,-10,
 ]
 QUEEN_TABLE = [
     -20,-10,-10, -5, -5,-10,-10,-20,
@@ -131,6 +135,16 @@ def is_endgame(board):
     )
     return minor_major <= 2
 
+def get_game_phase(board):
+    """Determine game phase for adaptive time management."""
+    ply = board.ply()
+    if ply < MAX_BOOK_PLY:
+        return "opening"
+    elif is_endgame(board):
+        return "endgame"
+    else:
+        return "middlegame"
+
 def material_score(board):
     score = 0
     for pt, val in PIECE_VALUES.items():
@@ -152,22 +166,66 @@ def piece_square_score(board, endgame):
     return score
 
 def pawn_structure_score(board):
+    """Enhanced pawn structure scoring."""
     score = 0
-    wp = board.pieces(chess.PAWN, chess.WHITE)
-    bp = board.pieces(chess.PAWN, chess.BLACK)
+    wp_set = board.pieces(chess.PAWN, chess.WHITE)
+    bp_set = board.pieces(chess.PAWN, chess.BLACK)
+    
+    wp = list(wp_set)
+    bp = list(bp_set)
+    
     for f in range(8):
-        wp_f = wp & chess.BB_FILES[f]
-        bp_f = bp & chess.BB_FILES[f]
-        adj = 0
-        if f > 0: adj |= chess.BB_FILES[f - 1]
-        if f < 7: adj |= chess.BB_FILES[f + 1]
-        if len(wp_f) > 1: score -= 15
-        if len(bp_f) > 1: score += 15
-        if wp_f and not (wp & adj): score -= 20
-        if bp_f and not (bp & adj): score += 20
+        wp_f = [s for s in wp if chess.square_file(s) == f]
+        bp_f = [s for s in bp if chess.square_file(s) == f]
+        
+        adj_files = set()
+        if f > 0: adj_files.add(f - 1)
+        if f < 7: adj_files.add(f + 1)
+        
+        wp_adjacent = [s for s in wp if chess.square_file(s) in adj_files]
+        bp_adjacent = [s for s in bp if chess.square_file(s) in adj_files]
+        
+        if len(wp_f) > 1: score -= 20
+        if len(bp_f) > 1: score += 20
+        
+        if wp_f and not wp_adjacent: score -= 25
+        if bp_f and not bp_adjacent: score += 25
+    
+    for sq in wp:
+        sq_file = chess.square_file(sq)
+        sq_rank = chess.square_rank(sq)
+        passed = True
+        for bp_sq in bp:
+            bp_file = chess.square_file(bp_sq)
+            bp_rank = chess.square_rank(bp_sq)
+            if bp_rank > sq_rank and abs(bp_file - sq_file) <= 1:
+                passed = False
+                break
+        if passed:
+            score += 40
+    
+    for sq in bp:
+        sq_file = chess.square_file(sq)
+        sq_rank = chess.square_rank(sq)
+        passed = True
+        for wp_sq in wp:
+            wp_file = chess.square_file(wp_sq)
+            wp_rank = chess.square_rank(wp_sq)
+            if wp_rank > sq_rank and abs(wp_file - sq_file) <= 1:
+                passed = False
+                break
+        if passed:
+            score -= 40
+    
+    center_pawns_white = [s for s in wp if chess.square_file(s) in (3, 4)]
+    center_pawns_black = [s for s in bp if chess.square_file(s) in (3, 4)]
+    score += 5 * len(center_pawns_white)
+    score -= 5 * len(center_pawns_black)
+    
     return score
 
 def king_safety_score(board, endgame):
+    """Enhanced king safety with castling evaluation and attack patterns."""
     if endgame:
         return 0
     score = 0
@@ -175,13 +233,122 @@ def king_safety_score(board, endgame):
         ks = board.king(color)
         if ks is None:
             continue
+        
         kf = chess.square_file(ks)
-        mask = chess.BB_FILES[kf]
-        if kf > 0: mask |= chess.BB_FILES[kf - 1]
-        if kf < 7: mask |= chess.BB_FILES[kf + 1]
-        shield = len(board.pieces(chess.PAWN, color) & mask)
-        penalty = max(0, 2 - shield) * 20
-        score += -penalty if color == chess.WHITE else penalty
+        kr = chess.square_rank(ks)
+        sign = -1 if color == chess.WHITE else 1
+        
+        # Strongly prefer castled kings
+        if ks in (chess.G1, chess.C1, chess.G8, chess.C8):
+            score += sign * 60  # Castled
+        elif ks in (chess.E1, chess.E8):
+            score -= sign * 25  # Still in center - penalty
+        elif kr == 0 or kr == 7:
+            score -= sign * 15  # Back rank but not castled
+        
+        # Pawn shield
+        shield_squares = []
+        if color == chess.WHITE:
+            for dr in [-1, 0]:
+                sq = ks - 8 + dr
+                if 0 <= sq < 64:
+                    shield_squares.append(sq)
+                sq = ks - 16 + dr
+                if 0 <= sq < 64:
+                    shield_squares.append(sq)
+        else:
+            for dr in [-1, 0]:
+                sq = ks + 8 + dr
+                if 0 <= sq < 64:
+                    shield_squares.append(sq)
+                sq = ks + 16 + dr
+                if 0 <= sq < 64:
+                    shield_squares.append(sq)
+        
+        pawns_on_shield = 0
+        for sq in shield_squares:
+            p = board.piece_at(sq)
+            if p and p.piece_type == chess.PAWN and p.color == color:
+                pawns_on_shield += 1
+        
+        if pawns_on_shield == 0:
+            score += sign * 60
+        elif pawns_on_shield == 1:
+            score += sign * 25
+        elif pawns_on_shield == 2:
+            score += sign * 10
+        
+        # Penalty for moved king
+        if (color == chess.WHITE and ks not in (chess.E1, chess.G1, chess.C1)) or \
+           (color == chess.BLACK and ks not in (chess.E8, chess.G8, chess.C8)):
+            rooks = board.pieces(chess.ROOK, color)
+            if color == chess.WHITE:
+                if not (chess.A1 in rooks or chess.H1 in rooks):
+                    score -= sign * 30
+            else:
+                if not (chess.A8 in rooks or chess.H8 in rooks):
+                    score -= sign * 30
+        
+        # Open file toward king
+        king_file_squares = []
+        for r in range(8):
+            king_file_squares.append(chess.square(kf, r))
+        
+        has_enemy_pawn_on_file = False
+        for sq in king_file_squares:
+            p = board.piece_at(sq)
+            if p and p.piece_type == chess.PAWN and p.color != color:
+                has_enemy_pawn_on_file = True
+                break
+        
+        if not has_enemy_pawn_on_file:
+            score -= sign * 15
+        
+        # Attackers near king
+        enemy = chess.BLACK if color == chess.WHITE else chess.WHITE
+        for df in [-1, 0, 1]:
+            for dr in [-1, 0, 1]:
+                if df == 0 and dr == 0:
+                    continue
+                af = kf + df
+                ar = kr + dr
+                if 0 <= af < 8 and 0 <= ar < 8:
+                    attack_sq = chess.square(af, ar)
+                    attacker = board.piece_at(attack_sq)
+                    if attacker and attacker.color == enemy:
+                        piece_val = PIECE_VALUES.get(attacker.piece_type, 0)
+                        if piece_val >= 330:
+                            score -= sign * 20
+    
+    # Penalty for rooks stuck in corners (h8/g8 oscillation for black)
+    # Encourage rooks to leave corner squares and active play
+    # Black rooks: avoid a8, b8, g8, h8 (starting squares and adjacent)
+    # White rooks: avoid a1, b1, g1, h1
+    corner_squares_white = (chess.A1, chess.H1)
+    corner_squares_black = (chess.A8, chess.H8)
+    adjacent_to_corner_white = (chess.B1, chess.G1)
+    adjacent_to_corner_black = (chess.B8, chess.G8)
+    
+    for rook_sq in board.pieces(chess.ROOK, chess.WHITE):
+        if rook_sq in corner_squares_white:
+            score -= 30  # Penalty for corner rook
+        elif rook_sq in adjacent_to_corner_white:
+            score -= 15  # Penalty for rook on square adjacent to corner
+    for rook_sq in board.pieces(chess.ROOK, chess.BLACK):
+        if rook_sq in corner_squares_black:
+            score += 30  # Penalty for black rook in corner
+        elif rook_sq in adjacent_to_corner_black:
+            score += 15  # Penalty for black rook adjacent to corner
+    
+    # Bonus for castling - encourage keeping king safe
+    for color in (chess.WHITE, chess.BLACK):
+        ks = board.king(color)
+        if ks is not None:
+            sign = -1 if color == chess.WHITE else 1
+            # King castled = good for that side
+            if ks in (chess.G1, chess.C1, chess.G8, chess.C8):
+                score += sign * 20
+    
     return score
 
 def evaluate_board(board):
@@ -205,9 +372,10 @@ killer_moves        = [[None, None] for _ in range(MAX_KILLERS_DEPTH)]
 history_table       = {}   # persists across moves for better ordering
 search_stopped      = False
 search_start        = 0.0
+time_limit          = BASE_TIME_LIMIT  # Will be set adaptively per move
 
 def _time_up():
-    return time.time() - search_start >= TIME_LIMIT
+    return time.time() - search_start >= time_limit
 
 # ---------- Move ordering ----------
 
@@ -243,6 +411,8 @@ def _update_history(move, depth):
 # ---------- Quiescence search ----------
 
 def quiescence(board, alpha, beta, qdepth=0):
+    """Enhanced quiescence search with proper terminal detection."""
+    # Detect checkmate / stalemate inside quiescence
     if board.is_game_over():
         if board.is_checkmate():
             return -99_000 + board.ply()
@@ -257,18 +427,20 @@ def quiescence(board, alpha, beta, qdepth=0):
         if stand_pat > alpha:
             alpha = stand_pat
 
-    # Hard cap to prevent infinite loops (mutual-check cascades)
-    if qdepth > 12:
+    # Adaptive quiescence depth based on position complexity
+    max_qdepth = 15 if in_check else 12
+    if qdepth > max_qdepth:
         return stand_pat
 
     for move in board.legal_moves:
         is_cap   = board.is_capture(move)
         is_promo = bool(move.promotion)
 
+        # When in check, search ALL legal moves (evasions)
         if not in_check and not is_cap and not is_promo:
             continue
 
-        # Delta pruning: only skip quiet captures that can't possibly help
+        # Delta pruning: skip hopeless quiet captures
         if not in_check and is_cap and not is_promo:
             victim = board.piece_at(move.to_square)
             if victim and stand_pat + PIECE_VALUES[victim.piece_type] + 200 < alpha:
@@ -285,9 +457,10 @@ def quiescence(board, alpha, beta, qdepth=0):
 
     return alpha
 
-# ---------- Negamax ----------
+# ---------- Negamax with advanced pruning ----------
 
-def negamax(board, depth, alpha, beta):
+def negamax(board, depth, alpha, beta, do_null=True):
+    """Enhanced negamax with multiple pruning techniques."""
     global search_stopped
 
     if search_stopped or _time_up():
@@ -298,6 +471,7 @@ def negamax(board, depth, alpha, beta):
     tt_move    = None
     orig_alpha = alpha
 
+    # Transposition table lookup
     if hash_key in transposition_table:
         tt_depth, tt_score, tt_flag, tt_mv = transposition_table[hash_key]
         if tt_depth >= depth:
@@ -311,25 +485,43 @@ def negamax(board, depth, alpha, beta):
                 return tt_score
         tt_move = tt_mv
 
+    # Terminal position detection
     if board.is_game_over():
         if board.is_checkmate():
             return -99_000 + board.ply()
         return 0
 
+    # Quiescence search at horizon
     if depth == 0:
         return quiescence(board, alpha, beta)
 
     in_check = board.is_check()
+    
+    # Razoring - CONSERVATIVE to prevent blunders
+    if depth == 1 and not in_check and not board.is_checkmate():
+        eval_score = evaluate_board(board)
+        if eval_score + 400 < alpha:
+            qscore = quiescence(board, alpha, beta)
+            if qscore < alpha:
+                return qscore
+
+    # Futility pruning - CONSERVATIVE: only skip very hopeless quiet moves
+    futility_prune = False
+    if depth == 1 and not in_check:
+        eval_score = evaluate_board(board)
+        futility_margin = 300  # Safe margin
+        if eval_score + futility_margin < alpha:
+            futility_prune = True
 
     # Null-move pruning (skip when in check or near endgame)
     non_pawn = sum(
         len(board.pieces(pt, board.turn))
         for pt in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN)
     )
-    if depth >= 3 and not in_check and non_pawn >= 2:
-        R = 2 if depth <= 6 else 3
+    if do_null and depth >= 3 and not in_check and non_pawn >= 1:
+        R = 2
         board.push(chess.Move.null())
-        null_score = -negamax(board, depth - 1 - R, -beta, -beta + 1)
+        null_score = -negamax(board, depth - 1 - R, -beta, -beta + 1, do_null=False)
         board.pop()
         if not search_stopped and null_score >= beta:
             return beta
@@ -340,15 +532,43 @@ def negamax(board, depth, alpha, beta):
     moves_done = 0
 
     for move in moves:
+        # Futility pruning: skip quiet moves that can't help
+        if (futility_prune 
+                and moves_done > 0
+                and not board.is_capture(move)
+                and not move.promotion
+                and not board.gives_check(move)):
+            continue
+
         board.push(move)
         gives_check = board.is_check()
+        
+        # --- SELECTIVE EXTENSIONS ---
+        extension = 0
+        
+        # Check extension
+        if gives_check:
+            extension = 1
+        # Pawn to 7th rank (near promotion)
+        if move.from_square is not None:
+            piece = board.piece_at(move.to_square)
+            if piece and piece.piece_type == chess.PAWN:
+                to_rank = chess.square_rank(move.to_square)
+                if (piece.color == chess.WHITE and to_rank == 6) or \
+                   (piece.color == chess.BLACK and to_rank == 1):
+                    extension = 1
+        # Recapture extension (capture on same square as last move)
+        if board.move_stack and len(board.move_stack) >= 2:
+            if board.is_capture(move):
+                last_move = board.move_stack[-2]
+                if move.to_square == last_move.to_square:
+                    extension = 1
 
-        # Check extension: look one ply deeper on checking moves
-        extension = 1 if gives_check else 0
-
+        # First move gets full search
         if moves_done == 0:
             score = -negamax(board, depth - 1 + extension, -beta, -alpha)
         else:
+            # --- LATE MOVE REDUCTION (LMR) ---
             reduction = 0
             if (depth >= 3
                     and moves_done >= 4
@@ -356,11 +576,20 @@ def negamax(board, depth, alpha, beta):
                     and not in_check
                     and not board.is_capture(move)
                     and not move.promotion):
-                reduction = 1 + (moves_done >= 8)
+                # More conservative LMR for better move stability
+                reduction = 1
+                if moves_done >= 8:
+                    reduction = 2
+                # Don't reduce killer moves as much
+                d = min(depth, MAX_KILLERS_DEPTH - 1)
+                if move in killer_moves[d]:
+                    reduction = max(0, reduction - 1)
 
+            # PVS: null window search
             score = -negamax(board, depth - 1 + extension - reduction, -alpha - 1, -alpha)
 
-            if not search_stopped and score > alpha:
+            # Re-search if it beat alpha or was reduced
+            if not search_stopped and (score > alpha or reduction > 0):
                 score = -negamax(board, depth - 1 + extension, -beta, -alpha)
 
         board.pop()
@@ -383,6 +612,7 @@ def negamax(board, depth, alpha, beta):
                 _update_history(move, depth)
             break
 
+    # Store in transposition table
     if not search_stopped and best_move is not None:
         flag = (TT_UPPER if best_score <= orig_alpha else
                 TT_LOWER if best_score >= beta       else
@@ -393,8 +623,31 @@ def negamax(board, depth, alpha, beta):
 
 # ---------- Iterative Deepening root ----------
 
+def calculate_time_for_move(board):
+    """Adaptive time allocation based on game phase and position complexity."""
+    phase = get_game_phase(board)
+    
+    # Increase base time to ensure deeper searches
+    base_multiplier = 1.0  # Increased from 0.6 to ensure minimum depth
+    
+    if phase == "opening":
+        multiplier = base_multiplier * TIME_SCALE_OPENING
+    elif phase == "middlegame":
+        multiplier = base_multiplier * TIME_SCALE_MIDDLEGAME
+    else:  # endgame
+        multiplier = base_multiplier * TIME_SCALE_ENDGAME
+    
+    # Adjust based on position complexity (number of legal moves)
+    num_legal_moves = board.legal_moves.count()
+    if num_legal_moves > COMPLEXITY_THRESHOLD:
+        multiplier *= 1.3  # Complex position: think longer
+    elif num_legal_moves < 10:
+        multiplier *= 0.7  # Simple position: think less
+    
+    return BASE_TIME_LIMIT * multiplier
+
 def get_best_move(board):
-    global transposition_table, killer_moves, search_stopped, search_start
+    global transposition_table, killer_moves, search_stopped, search_start, time_limit
 
     # Opening book — only for the first MAX_BOOK_PLY half-moves
     if board.ply() < MAX_BOOK_PLY:
@@ -412,22 +665,29 @@ def get_best_move(board):
     killer_moves   = [[None, None] for _ in range(MAX_KILLERS_DEPTH)]
     search_stopped = False
     search_start   = time.time()
+    
+    # Adaptive time allocation
+    time_limit = calculate_time_for_move(board)
+    phase = get_game_phase(board)
+    print(f"Phase: {phase}, Time allocated: {time_limit:.2f}s")
 
     best_move  = list(board.legal_moves)[0]
     prev_score = 0
 
-    for depth in range(1, MAX_DEPTH + 1):
+    # Start search at depth 3 minimum - never search at depth 1 or 2
+    for depth in range(3, MAX_DEPTH + 1):
         if search_stopped or _time_up():
             break
 
-        # Aspiration windows from depth 4 onwards
-        if depth >= 4:
-            delta     = 50
+        # Aspiration windows - wider for stability
+        if depth == 3:
+            delta = 100  # Wider for low depths
             asp_alpha = prev_score - delta
             asp_beta  = prev_score + delta
         else:
-            asp_alpha = -float('inf')
-            asp_beta  =  float('inf')
+            delta = 50  # Normal for deeper
+            asp_alpha = prev_score - delta
+            asp_beta  = prev_score + delta
 
         while True:
             depth_best  = None
@@ -441,6 +701,7 @@ def get_best_move(board):
                 if i == 0:
                     score = -negamax(board, depth - 1, -asp_beta, -asp_alpha)
                 else:
+                    # PVS at root
                     score = -negamax(board, depth - 1, -depth_score - 1, -depth_score)
                     if not search_stopped and score > depth_score:
                         score = -negamax(board, depth - 1, -asp_beta, -depth_score)
@@ -478,12 +739,17 @@ def get_best_move(board):
             best_move  = depth_best
             prev_score = depth_score
             elapsed    = time.time() - search_start
-            print(f"  depth {depth:2d} | {best_move} | score {depth_score:+.0f} | {elapsed:.2f}s")
+            print(f"  depth {depth:2d} | {best_move} | score {depth_score:+6.0f} | {elapsed:.2f}s")
 
-        # Only stop early if we've used most of the budget
-        if time.time() - search_start >= TIME_LIMIT * 0.85:
+        # Early stopping after minimum depth of 3 is always completed
+        elapsed = time.time() - search_start
+        if depth >= 3 and elapsed >= time_limit * 0.5:
+            break
+        if depth >= 6 and elapsed >= time_limit * 0.7:
             break
 
+    elapsed_total = time.time() - search_start
+    print(f"Total time: {elapsed_total:.2f}s, Final move: {best_move}")
     return best_move
 
 # ---------- GUI ----------
@@ -492,7 +758,7 @@ def load_images():
     pieces = ["wP","wN","wB","wR","wQ","wK","bP","bN","bB","bR","bQ","bK"]
     for p in pieces:
         img = pg.image.load("images/" + p + ".png")
-        IMAGE[p] = pg.transform.smoothscale(img, (int(SQ_SIZE * 0.8), int(SQ_SIZE * 0.8)))
+        IMAGE[p] = pg.transform.smoothscale(img, (int(SQ_SIZE), int(SQ_SIZE)))
 
 def draw_status(screen, board, font):
     pg.draw.rect(screen, (50, 50, 50), (0, 0, WIDTH, 68))
@@ -519,7 +785,7 @@ def draw_pieces(screen, board):
             key = ('w' if piece.color == chess.WHITE else 'b') + piece.symbol().upper()
             col = chess.square_file(square)
             row = 7 - chess.square_rank(square)
-            screen.blit(IMAGE[key], (col * SQ_SIZE + 5, row * SQ_SIZE + 73))
+            screen.blit(IMAGE[key], (col * SQ_SIZE, row * SQ_SIZE + 68))
     if board.is_check() or board.is_checkmate():
         ks = board.king(board.turn)
         if ks:
@@ -532,7 +798,7 @@ def main():
     pg.init()
     load_images()
     screen = pg.display.set_mode((WIDTH, HEIGHT))
-    pg.display.set_caption("Chess Bot")
+    pg.display.set_caption("Chess Bot - Enhanced")
     font  = pg.font.SysFont("Arial", 32, bold=True)
     clock = pg.time.Clock()
 
