@@ -46,3 +46,5 @@ Visual Cues: Highlights legal moves, selected pieces, the last move made, and ki
 ## Credits
 The chess piece images used in this project are sourced from **Green Chess**. 
 They are licensed under **Creative Commons Attribution-ShareAlike (CC BY-SA)**.
+
+The opening book file, gm2600.bin, was originally created by Pascal Georges. This specific version was sourced from [DannyStoll1/chess-opening-prep](https://github.com/DannyStoll1/chess-opening-prep).
