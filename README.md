@@ -5,7 +5,7 @@ Estimated ELO (10s move time): ~2000
 
 Note: Changing move time will change strength
 
-# 🚀 Features
+# Features
 The Engine
 Search Algorithm: Optimized Negamax with Alpha-Beta pruning.
 
